@@ -29,6 +29,25 @@ async def get_live_matches():
 sent_signals = set()
 
 
+def format_games(games, fav_index):
+    """Красиво форматирует счёт по сетам с галочками/крестиками для фаворита"""
+    if not games:
+        return "—"
+    lines = []
+    for i, g in enumerate(games, start=1):
+        if len(g) == 2:
+            fav_g = g[fav_index]
+            und_g = g[1 - fav_index]
+            if fav_g > und_g:
+                mark = "✅"
+            elif fav_g < und_g:
+                mark = "❌"
+            else:
+                mark = "➖"
+            lines.append(f"   Сет {i}: {fav_g}–{und_g} {mark}")
+    return "\n".join(lines)
+
+
 async def check_signals(bot: Bot):
     global sent_signals
     while True:
@@ -38,12 +57,12 @@ async def check_signals(bot: Bot):
             for m in matches:
                 mid = m.get('id')
                 tournament = m.get('tournament', '?')
+                round_name = m.get('round', '')
                 p1 = (m.get('players') or {}).get('p1') or {}
                 p2 = (m.get('players') or {}).get('p2') or {}
                 score = m.get('score') or {}
                 sets = score.get('sets') or []
                 games = score.get('games') or []
-                server = score.get('server')
 
                 r1 = p1.get('ranking')
                 r2 = p2.get('ranking')
@@ -78,13 +97,22 @@ async def check_signals(bot: Bot):
                         key = f"{mid}_setloss_{fav_sets}_{und_sets}"
                         if key not in sent_signals:
                             sent_signals.add(key)
+
+                            games_str = format_games(games, fav_index)
+                            round_str = f"🎾 Раунд: {round_name}\n" if round_name else ""
+
                             msg = (
-                                f"⚠️ ФАВОРИТ ПРОИГРЫВАЕТ ПО СЕТАМ\n\n"
-                                f"🏆 {tournament}\n\n"
-                                f"⭐ Фаворит: {favorite.get('name')} (рейтинг {fav_rank})\n"
-                                f"👤 Андердог: {underdog.get('name')} (рейтинг {und_rank})\n\n"
-                                f"📊 Счёт по сетам: {sets[0]} : {sets[1]}\n"
-                                f"🎾 Геймы: {games}"
+                                f"🔴 <b>ФАВОРИТ ПРОИГРЫВАЕТ ПО СЕТАМ</b>\n\n"
+                                f"🏆 <i>{tournament}</i>\n"
+                                f"{round_str}\n"
+                                f"<b>⭐ ФАВОРИТ:</b> {favorite.get('name')}\n"
+                                f"   📊 Рейтинг: {fav_rank}\n\n"
+                                f"<b>👤 АНДЕРДОГ:</b> {underdog.get('name')}\n"
+                                f"   📊 Рейтинг: {und_rank}\n\n"
+                                f"━━━━━━━━━━━━━━━━━━━━\n"
+                                f"📊 <b>Счёт по сетам:</b> {sets[0]} : {sets[1]}\n"
+                                f"🎯 <b>Геймы:</b>\n{games_str}\n\n"
+                                f"⚠️ <i>Возможен заход на андердога</i>"
                             )
                             try:
                                 await bot.send_message(chat_id=CHANNEL_ID, text=msg)
