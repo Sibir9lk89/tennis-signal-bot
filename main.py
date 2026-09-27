@@ -29,8 +29,12 @@ async def check_signals(bot: Bot):
     while True:
         try:
             matches = await get_live_matches()
-            for match in matches:
-                print(f"Live match: {match.get('id')}")
+            print(f"=== Получено матчей: {len(matches)} ===")
+            if matches:
+                print("=== ПОЛНЫЕ ДАННЫЕ ПЕРВОГО МАТЧА ===")
+                import json
+                print(json.dumps(matches[0], indent=2, ensure_ascii=False))
+                print("=== КОНЕЦ ДАННЫХ ===")
         except Exception as e:
             print(f"Ошибка: {e}")
 
