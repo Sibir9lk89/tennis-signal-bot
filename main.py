@@ -29,16 +29,26 @@ async def check_signals(bot: Bot):
     while True:
         try:
             matches = await get_live_matches()
-            print(f"=== Получено матчей: {len(matches)} ===")
-            if matches:
-                print("=== ПОЛНЫЕ ДАННЫЕ ПЕРВОГО МАТЧА ===")
-                import json
-                print(json.dumps(matches[0], indent=2, ensure_ascii=False))
-                print("=== КОНЕЦ ДАННЫХ ===")
+            print(f"=== Матчей: {len(matches)} ===")
+            import json
+            for m in matches[:3]:
+                print("---")
+                print(f"ID: {m.get('id')} | {m.get('tournament')} | {m.get('status')}")
+                score = m.get('score') or {}
+                print(f"  sets: {score.get('sets')}")
+                print(f"  games: {score.get('games')}")
+                print(f"  points: {score.get('points')}")
+                print(f"  server: {score.get('server')}")
+                print(f"  is_tiebreak: {score.get('is_tiebreak')}")
+                print(f"  age_seconds: {score.get('age_seconds')}")
+                p1 = (m.get('players') or {}).get('p1') or {}
+                p2 = (m.get('players') or {}).get('p2') or {}
+                print(f"  p1: {p1.get('name')} (ranking: {p1.get('ranking')})")
+                print(f"  p2: {p2.get('name')} (ranking: {p2.get('ranking')})")
         except Exception as e:
             print(f"Ошибка: {e}")
 
-        await asyncio.sleep(900)
+
 
 
 async def main():
