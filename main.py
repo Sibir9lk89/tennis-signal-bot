@@ -4,6 +4,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 import os
+import time
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 LIVETENNIS_KEY = os.getenv("LIVETENNIS_API_KEY")
@@ -11,8 +12,20 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 
 dp = Dispatcher()
 
+# Время, до которого API заблокирован (из ответа 429)
+api_blocked_until = 0
+
 
 async def get_live_matches():
+    global api_blocked_until
+
+    # Если API заблокирован — не дёргаем его
+    now = int(time.time())
+    if now < api_blocked_until:
+        remain = api_blocked_until - now
+        print(f"=== API ЗАБЛОКИРОВАН, ждём {remain // 60} мин ===")
+        return []
+
     url = "https://api.livetennisapi.com/api/public/v1/matches"
     headers = {"Authorization": f"Bearer {LIVETENNIS_KEY}"}
     params = {"status": "live"}
@@ -22,16 +35,30 @@ async def get_live_matches():
             if resp.status == 200:
                 data = await resp.json()
                 return data.get("data", [])
-            print(f"=== API STATUS: {resp.status} ===")
-            return []
+            elif resp.status == 429:
+                # Читаем, когда разблокируется
+                try:
+                    err_data = await resp.json()
+                    retry_at = err_data.get("retry_at_epoch")
+                    if retry_at:
+                        api_blocked_until = int(retry_at)
+                        print(f"=== API 429, блокировка до {api_blocked_until} ===")
+                    else:
+                        api_blocked_until = now + 3600  # на всякий случай 1 час
+                        print(f"=== API 429, блокировка на 1 час ===")
+                except Exception:
+                    api_blocked_until = now + 3600
+                    print(f"=== API 429, блокировка на 1 час (не смог прочитать retry_at) ===")
+                return []
+            else:
+                print(f"=== API STATUS: {resp.status} ===")
+                return []
 
 
-# Хранилище отправленных сигналов
 sent_signals = set()
 
 
 def format_games(games, fav_index):
-    """Красиво форматирует счёт по сетам с галочками/крестиками для фаворита"""
     if not games:
         return "—"
     lines = []
@@ -90,7 +117,6 @@ async def check_signals(bot: Bot):
                 else:
                     continue
 
-                # ФАВОРИТ ПРОИГРЫВАЕТ ПО СЕТАМ
                 if len(sets) == 2:
                     fav_sets = sets[fav_index]
                     und_sets = sets[1 - fav_index]
@@ -124,7 +150,7 @@ async def check_signals(bot: Bot):
         except Exception as e:
             print(f"Ошибка: {e}")
 
-        await asyncio.sleep(900)   # 15 минут
+        await asyncio.sleep(900)
 
 
 async def main():
