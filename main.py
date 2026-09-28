@@ -19,10 +19,17 @@ async def get_live_matches():
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers, params=params) as resp:
-            if resp.status == 200:
+            print(f"=== API STATUS: {resp.status} ===")
+            text = await resp.text()
+            print(f"=== API RESPONSE (первые 500 символов) ===")
+            print(text[:500])
+            print(f"=== КОНЕЦ ===")
+            try:
                 data = await resp.json()
                 return data.get("data", [])
-            return []
+            except Exception as parse_err:
+                print(f"Ошибка парсинга JSON: {parse_err}")
+                return []
 
 
 # Хранилище отправленных сигналов
