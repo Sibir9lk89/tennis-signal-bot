@@ -15,7 +15,7 @@ dp = Dispatcher()
 async def get_live_matches():
     url = "https://api.livetennisapi.com/api/public/v1/matches"
     headers = {"Authorization": f"Bearer {LIVETENNIS_KEY}"}
-    params = {"status": "live"}
+    params = {}
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers, params=params) as resp:
