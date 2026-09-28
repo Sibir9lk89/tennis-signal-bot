@@ -15,21 +15,15 @@ dp = Dispatcher()
 async def get_live_matches():
     url = "https://api.livetennisapi.com/api/public/v1/matches"
     headers = {"Authorization": f"Bearer {LIVETENNIS_KEY}"}
-    params = {}
+    params = {"status": "live"}
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers, params=params) as resp:
-            print(f"=== API STATUS: {resp.status} ===")
-            text = await resp.text()
-            print(f"=== API RESPONSE (первые 500 символов) ===")
-            print(text[:500])
-            print(f"=== КОНЕЦ ===")
-            try:
+            if resp.status == 200:
                 data = await resp.json()
                 return data.get("data", [])
-            except Exception as parse_err:
-                print(f"Ошибка парсинга JSON: {parse_err}")
-                return []
+            print(f"=== API STATUS: {resp.status} ===")
+            return []
 
 
 # Хранилище отправленных сигналов
@@ -130,7 +124,7 @@ async def check_signals(bot: Bot):
         except Exception as e:
             print(f"Ошибка: {e}")
 
-        await asyncio.sleep(120)
+        await asyncio.sleep(900)   # 15 минут
 
 
 async def main():
