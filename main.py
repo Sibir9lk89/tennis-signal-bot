@@ -5,10 +5,19 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 import os
 import time
+import json
+from datetime import datetime
+
+# Google Sheets
+import gspread
+from google.oauth2.service_account import Credentials
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 LIVETENNIS_KEY = os.getenv("LIVETENNIS_API_KEY")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
+THE_ODDS_API_KEY = os.getenv("THE_ODDS_API_KEY")
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
+GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
 
 dp = Dispatcher()
 
@@ -16,10 +25,106 @@ api_blocked_until = 0
 sent_signals = set()
 last_summary_time = 0
 
-# Порог устаревания данных (в секундах)
 STALE_THRESHOLD = 120
 
+# --- Google Sheets ---
+gs_client = None
+sheet = None
 
+
+def init_google_sheets():
+    """Подключается к Google-таблице. Возвращает True/False."""
+    global gs_client, sheet
+    try:
+        if not GOOGLE_CREDS_JSON:
+            print("=== GOOGLE: нет переменной GOOGLE_CREDS_JSON ===")
+            return False
+
+        creds_dict = json.loads(GOOGLE_CREDS_JSON)
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        gs_client = gspread.authorize(creds)
+
+        # Открываем таблицу по ID
+        spreadsheet = gs_client.open_by_key(GOOGLE_SHEET_ID)
+        sheet = spreadsheet.sheet1  # первый лист
+        print(f"=== GOOGLE: подключено к таблице '{spreadsheet.title}' ===")
+        return True
+    except json.JSONDecodeError as e:
+        print(f"=== GOOGLE: ошибка парсинга JSON: {e} ===")
+        return False
+    except Exception as e:
+        print(f"=== GOOGLE: ошибка подключения: {e} ===")
+        return False
+
+
+def write_signal_to_sheet(row_data):
+    """Записывает строку в таблицу."""
+    global sheet
+    if sheet is None:
+        print("=== GOOGLE: таблица не подключена, пропускаем запись ===")
+        return
+    try:
+        sheet.append_row(row_data)
+        print(f"=== GOOGLE: записана строка: {row_data} ===")
+    except Exception as e:
+        print(f"=== GOOGLE: ошибка записи: {e} ===")
+
+
+# --- The Odds API ---
+async def get_live_odds(player1, player2):
+    """
+    Запрашивает live-коэффициенты для матча у The Odds API.
+    Возвращает коэффициент на player2 (андердога) или None.
+    """
+    if not THE_ODDS_API_KEY:
+        return None
+
+    url = "https://api.the-odds-api.com/v4/sports/tennis_atp/odds/"
+    params = {
+        "apiKey": THE_ODDS_API_KEY,
+        "regions": "eu",
+        "markets": "h2h",
+        "oddsFormat": "decimal",
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=10) as resp:
+                if resp.status != 200:
+                    print(f"=== ODDS API: статус {resp.status} ===")
+                    return None
+                data = await resp.json()
+                # Ищем матч по именам игроков
+                for match in data:
+                    home = (match.get("home_team") or "").lower()
+                    away = (match.get("away_team") or "").lower()
+                    p1_low = player1.lower()
+                    p2_low = player2.lower()
+                    if (p1_low in home or p1_low in away) and (p2_low in home or p2_low in away):
+                        # Нашли матч — берём первый букмекерский кэф на андердога
+                        bookmakers = match.get("bookmakers") or []
+                        if bookmakers:
+                            markets = bookmakers[0].get("markets") or []
+                            if markets:
+                                outcomes = markets[0].get("outcomes") or []
+                                for o in outcomes:
+                                    name = (o.get("name") or "").lower()
+                                    if p2_low in name:
+                                        return o.get("price")
+                return None
+    except asyncio.TimeoutError:
+        print("=== ODDS API: таймаут ===")
+        return None
+    except Exception as e:
+        print(f"=== ODDS API: ошибка: {e} ===")
+        return None
+
+
+# --- Live Tennis API ---
 async def get_live_matches():
     global api_blocked_until
     now = int(time.time())
@@ -57,19 +162,13 @@ async def get_live_matches():
 
 
 def format_games(games, p1_name, p2_name):
-    """
-    Форматирует геймы так:
-    Сет 1: 1–6 (победил: p2_name)
-    Сет 2: 6–3 (победил: p1_name)
-    где первое число — геймы p1, второе — геймы p2.
-    """
     if not games:
         return "—"
     lines = []
     for i, g in enumerate(games, start=1):
         if len(g) == 2:
-            g1 = g[0]  # геймы p1
-            g2 = g[1]  # геймы p2
+            g1 = g[0]
+            g2 = g[1]
             if g1 > g2:
                 winner = f"победил {p1_name}"
             elif g2 > g1:
@@ -120,26 +219,16 @@ async def check_signals(bot: Bot):
                 games = score.get('games') or []
                 age = score.get('age_seconds')
 
-                # Пропускаем устаревшие матчи
                 if age is not None and age > STALE_THRESHOLD:
-                    print(f"  матч {mid}: пропуск — данные устарели (age {age} сек)")
+                    print(f"  матч {mid}: пропуск — устарели данные (age {age})")
                     continue
 
                 fresh_count += 1
 
                 fav_data = get_favorite(p1, p2)
                 if not fav_data:
-                    print(f"  матч {mid}: пропуск — нет рейтинга у обоих")
                     continue
                 favorite, underdog, fav_index, fav_rank, und_rank = fav_data
-
-                # Отладка
-                print(f"=== DEBUG матч {mid} ===")
-                print(f"  p1: {p1_name} (rank {p1.get('ranking')})")
-                print(f"  p2: {p2_name} (rank {p2.get('ranking')})")
-                print(f"  favorite: {favorite.get('name')} (index {fav_index})")
-                print(f"  sets: {sets} | games: {games} | age: {age}")
-                print(f"=== КОНЕЦ DEBUG ===")
 
                 # --- СИГНАЛ 1: Фаворит проиграл первый сет ---
                 if len(sets) == 2:
@@ -156,6 +245,11 @@ async def check_signals(bot: Bot):
                             sent_signals.add(key)
                             games_str = format_games(games, p1_name, p2_name)
                             round_str = f"🎾 Раунд: {round_name}\n" if round_name else ""
+
+                            # Запрашиваем кэф на андердога
+                            odds = await get_live_odds(p1_name, p2_name)
+                            odds_str = f"💰 <b>Live-кэф на андердога:</b> {odds}\n" if odds else ""
+
                             msg = (
                                 f"🔴 <b>ФАВОРИТ ПРОИГРАЛ ПЕРВЫЙ СЕТ</b>\n\n"
                                 f"🏆 <i>{tournament}</i>\n"
@@ -166,7 +260,8 @@ async def check_signals(bot: Bot):
                                 f"   📊 Рейтинг: {und_rank}\n\n"
                                 f"━━━━━━━━━━━━━━━━━━━━\n"
                                 f"📊 <b>Счёт по сетам:</b> {sets[0]} : {sets[1]}\n"
-                                f"🎯 <b>Геймы (P1 – P2):</b>\n{games_str}\n\n"
+                                f"🎯 <b>Геймы (P1 – P2):</b>\n{games_str}\n"
+                                f"{odds_str}\n"
                                 f"⚠️ <i>Возможен заход на андердога</i>"
                             )
                             try:
@@ -175,34 +270,18 @@ async def check_signals(bot: Bot):
                             except Exception as e:
                                 print(f"Ошибка отправки: {e}")
 
-                # --- СИГНАЛ 2: Фаворит проигрывает по сетам (0:2, 1:2) ---
-                if len(sets) == 2:
-                    fav_sets = sets[fav_index]
-                    und_sets = sets[1 - fav_index]
-                    if fav_sets < und_sets and und_sets > 1:
-                        key = f"{mid}_setloss_{fav_sets}_{und_sets}"
-                        if key not in sent_signals:
-                            sent_signals.add(key)
-                            games_str = format_games(games, p1_name, p2_name)
-                            round_str = f"🎾 Раунд: {round_name}\n" if round_name else ""
-                            msg = (
-                                f"🔴 <b>ФАВОРИТ ПРОИГРЫВАЕТ ПО СЕТАМ</b>\n\n"
-                                f"🏆 <i>{tournament}</i>\n"
-                                f"{round_str}\n"
-                                f"<b>⭐ ФАВОРИТ:</b> {favorite.get('name')}\n"
-                                f"   📊 Рейтинг: {fav_rank}\n\n"
-                                f"<b>👤 АНДЕРДОГ:</b> {underdog.get('name')}\n"
-                                f"   📊 Рейтинг: {und_rank}\n\n"
-                                f"━━━━━━━━━━━━━━━━━━━━\n"
-                                f"📊 <b>Счёт по сетам:</b> {sets[0]} : {sets[1]}\n"
-                                f"🎯 <b>Геймы (P1 – P2):</b>\n{games_str}\n\n"
-                                f"⚠️ <i>Возможен заход на андердога</i>"
-                            )
-                            try:
-                                await bot.send_message(chat_id=CHANNEL_ID, text=msg)
-                                print(f"СИГНАЛ 2 (сеты): {mid}")
-                            except Exception as e:
-                                print(f"Ошибка отправки: {e}")
+                            # Запись в Google-таблицу
+                            write_signal_to_sheet([
+                                datetime.now().strftime("%Y-%m-%d %H:%M"),
+                                tournament,
+                                round_name,
+                                favorite.get('name'),
+                                str(fav_rank),
+                                underdog.get('name'),
+                                str(und_rank),
+                                f"{sets[0]}:{sets[1]}",
+                                odds if odds else "",
+                            ])
 
             # --- Часовая сводка ---
             now = int(time.time())
@@ -213,8 +292,7 @@ async def check_signals(bot: Bot):
                     summary_msg = (
                         f"📊 <b>СВОДКА ЗА ЧАС</b>\n\n"
                         f"🎾 Live-матчей (свежих): {fresh_count}\n"
-                        f"🔴 Фаворитов проиграли 1-й сет: {first_set_lost_count}\n"
-                        f"⚠️ Всего фаворитов в невыгодном положении: {favorites_losing}\n\n"
+                        f"🔴 Фаворитов проиграли 1-й сет: {first_set_lost_count}\n\n"
                         f"<b>Кого смотреть:</b>\n{summary_text}"
                     )
                 else:
@@ -236,6 +314,10 @@ async def check_signals(bot: Bot):
 
 
 async def main():
+    # Подключаемся к Google Sheets
+    print("=== СТАРТ: подключение к Google Sheets ===")
+    init_google_sheets()
+
     bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     asyncio.create_task(check_signals(bot))
     await dp.start_polling(bot)
