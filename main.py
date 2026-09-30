@@ -41,7 +41,8 @@ def init_google_sheets():
             print("=== GOOGLE: нет переменной GOOGLE_CREDS_BASE64 ===")
             return False
 
-        decoded = base64.b64decode(GOOGLE_CREDS_BASE64).decode("utf-8")
+                cleaned = GOOGLE_CREDS_BASE64.strip().strip('"').strip("'").replace("\n", "").replace(" ", "")
+        decoded = base64.b64decode(cleaned).decode("utf-8")
         creds_dict = json.loads(decoded)
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
