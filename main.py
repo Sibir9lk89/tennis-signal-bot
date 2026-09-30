@@ -5,7 +5,6 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 import os
 import time
-import json
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 LIVETENNIS_KEY = os.getenv("LIVETENNIS_API_KEY")
@@ -16,6 +15,9 @@ dp = Dispatcher()
 api_blocked_until = 0
 sent_signals = set()
 last_summary_time = 0
+
+# Порог устаревания данных (в секундах)
+STALE_THRESHOLD = 120
 
 
 async def get_live_matches():
@@ -54,21 +56,27 @@ async def get_live_matches():
                 return []
 
 
-def format_games(games, fav_index):
+def format_games(games, p1_name, p2_name):
+    """
+    Форматирует геймы так:
+    Сет 1: 1–6 (победил: p2_name)
+    Сет 2: 6–3 (победил: p1_name)
+    где первое число — геймы p1, второе — геймы p2.
+    """
     if not games:
         return "—"
     lines = []
     for i, g in enumerate(games, start=1):
         if len(g) == 2:
-            fav_g = g[fav_index]
-            und_g = g[1 - fav_index]
-            if fav_g > und_g:
-                mark = "✅"
-            elif fav_g < und_g:
-                mark = "❌"
+            g1 = g[0]  # геймы p1
+            g2 = g[1]  # геймы p2
+            if g1 > g2:
+                winner = f"победил {p1_name}"
+            elif g2 > g1:
+                winner = f"победил {p2_name}"
             else:
-                mark = "➖"
-            lines.append(f"   Сет {i}: {fav_g}–{und_g} {mark}")
+                winner = "идёт"
+            lines.append(f"   Сет {i}: {g1}–{g2} ({winner})")
     return "\n".join(lines)
 
 
@@ -97,6 +105,7 @@ async def check_signals(bot: Bot):
             summary_lines = []
             favorites_losing = 0
             first_set_lost_count = 0
+            fresh_count = 0
 
             for m in matches:
                 mid = m.get('id')
@@ -104,41 +113,39 @@ async def check_signals(bot: Bot):
                 round_name = m.get('round', '')
                 p1 = (m.get('players') or {}).get('p1') or {}
                 p2 = (m.get('players') or {}).get('p2') or {}
+                p1_name = p1.get('name', '?')
+                p2_name = p2.get('name', '?')
                 score = m.get('score') or {}
                 sets = score.get('sets') or []
                 games = score.get('games') or []
                 age = score.get('age_seconds')
 
+                # Пропускаем устаревшие матчи
+                if age is not None and age > STALE_THRESHOLD:
+                    print(f"  матч {mid}: пропуск — данные устарели (age {age} сек)")
+                    continue
+
+                fresh_count += 1
+
                 fav_data = get_favorite(p1, p2)
                 if not fav_data:
+                    print(f"  матч {mid}: пропуск — нет рейтинга у обоих")
                     continue
                 favorite, underdog, fav_index, fav_rank, und_rank = fav_data
 
-                # --- ОТЛАДКА: печатаем сырые данные для каждого матча ---
+                # Отладка
                 print(f"=== DEBUG матч {mid} ===")
-                print(f"  tournament: {tournament}")
-                print(f"  round: {round_name}")
-                print(f"  p1: {p1.get('name')} (rank {p1.get('ranking')})")
-                print(f"  p2: {p2.get('name')} (rank {p2.get('ranking')})")
+                print(f"  p1: {p1_name} (rank {p1.get('ranking')})")
+                print(f"  p2: {p2_name} (rank {p2.get('ranking')})")
                 print(f"  favorite: {favorite.get('name')} (index {fav_index})")
-                print(f"  underdog: {underdog.get('name')}")
-                print(f"  sets (raw): {sets}")
-                print(f"  games (raw): {games}")
-                print(f"  age_seconds: {age}")
+                print(f"  sets: {sets} | games: {games} | age: {age}")
                 print(f"=== КОНЕЦ DEBUG ===")
 
                 # --- СИГНАЛ 1: Фаворит проиграл первый сет ---
-                # Условие: матч ещё в первом или втором сете (len(games) <= 2)
-                # и счёт по сетам 0:1 (фаворит проиграл ровно один сет)
                 if len(sets) == 2:
                     fav_sets = sets[fav_index]
                     und_sets = sets[1 - fav_index]
                     if fav_sets == 0 and und_sets == 1:
-                        # Проверяем, что данных не устарели (age < 120 сек)
-                        if age is not None and age > 180:
-                            print(f"  матч {mid}: пропуск — данные устарели (age {age})")
-                            continue
-
                         favorites_losing += 1
                         first_set_lost_count += 1
                         summary_lines.append(
@@ -147,7 +154,7 @@ async def check_signals(bot: Bot):
                         key = f"{mid}_firstset"
                         if key not in sent_signals:
                             sent_signals.add(key)
-                            games_str = format_games(games, fav_index)
+                            games_str = format_games(games, p1_name, p2_name)
                             round_str = f"🎾 Раунд: {round_name}\n" if round_name else ""
                             msg = (
                                 f"🔴 <b>ФАВОРИТ ПРОИГРАЛ ПЕРВЫЙ СЕТ</b>\n\n"
@@ -158,8 +165,8 @@ async def check_signals(bot: Bot):
                                 f"<b>👤 АНДЕРДОГ:</b> {underdog.get('name')}\n"
                                 f"   📊 Рейтинг: {und_rank}\n\n"
                                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                                f"📊 <b>Счёт по сетам:</b> {fav_sets} : {und_sets}\n"
-                                f"🎯 <b>Геймы:</b>\n{games_str}\n\n"
+                                f"📊 <b>Счёт по сетам:</b> {sets[0]} : {sets[1]}\n"
+                                f"🎯 <b>Геймы (P1 – P2):</b>\n{games_str}\n\n"
                                 f"⚠️ <i>Возможен заход на андердога</i>"
                             )
                             try:
@@ -168,19 +175,15 @@ async def check_signals(bot: Bot):
                             except Exception as e:
                                 print(f"Ошибка отправки: {e}")
 
-                # --- СИГНАЛ 2: Фаворит проигрывает по сетам (0:2, 1:2 и т.д.) ---
+                # --- СИГНАЛ 2: Фаворит проигрывает по сетам (0:2, 1:2) ---
                 if len(sets) == 2:
                     fav_sets = sets[fav_index]
                     und_sets = sets[1 - fav_index]
                     if fav_sets < und_sets and und_sets > 1:
-                        if age is not None and age > 180:
-                            print(f"  матч {mid}: пропуск — данные устарели (age {age})")
-                            continue
-
                         key = f"{mid}_setloss_{fav_sets}_{und_sets}"
                         if key not in sent_signals:
                             sent_signals.add(key)
-                            games_str = format_games(games, fav_index)
+                            games_str = format_games(games, p1_name, p2_name)
                             round_str = f"🎾 Раунд: {round_name}\n" if round_name else ""
                             msg = (
                                 f"🔴 <b>ФАВОРИТ ПРОИГРЫВАЕТ ПО СЕТАМ</b>\n\n"
@@ -191,8 +194,8 @@ async def check_signals(bot: Bot):
                                 f"<b>👤 АНДЕРДОГ:</b> {underdog.get('name')}\n"
                                 f"   📊 Рейтинг: {und_rank}\n\n"
                                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                                f"📊 <b>Счёт по сетам:</b> {fav_sets} : {und_sets}\n"
-                                f"🎯 <b>Геймы:</b>\n{games_str}\n\n"
+                                f"📊 <b>Счёт по сетам:</b> {sets[0]} : {sets[1]}\n"
+                                f"🎯 <b>Геймы (P1 – P2):</b>\n{games_str}\n\n"
                                 f"⚠️ <i>Возможен заход на андердога</i>"
                             )
                             try:
@@ -209,7 +212,7 @@ async def check_signals(bot: Bot):
                     summary_text = "\n".join(summary_lines[:15])
                     summary_msg = (
                         f"📊 <b>СВОДКА ЗА ЧАС</b>\n\n"
-                        f"🎾 Live-матчей: {len(matches)}\n"
+                        f"🎾 Live-матчей (свежих): {fresh_count}\n"
                         f"🔴 Фаворитов проиграли 1-й сет: {first_set_lost_count}\n"
                         f"⚠️ Всего фаворитов в невыгодном положении: {favorites_losing}\n\n"
                         f"<b>Кого смотреть:</b>\n{summary_text}"
@@ -217,7 +220,7 @@ async def check_signals(bot: Bot):
                 else:
                     summary_msg = (
                         f"📊 <b>СВОДКА ЗА ЧАС</b>\n\n"
-                        f"🎾 Live-матчей: {len(matches)}\n"
+                        f"🎾 Live-матчей (свежих): {fresh_count}\n"
                         f"✅ Все фавориты пока в порядке"
                     )
                 try:
