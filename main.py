@@ -5,6 +5,7 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 import os
 import time
+import json
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 LIVETENNIS_KEY = os.getenv("LIVETENNIS_API_KEY")
@@ -12,13 +13,8 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 
 dp = Dispatcher()
 
-# Защита от 429
 api_blocked_until = 0
-
-# Хранилище отправленных сигналов
 sent_signals = set()
-
-# Последняя отправка сводки
 last_summary_time = 0
 
 
@@ -77,10 +73,6 @@ def format_games(games, fav_index):
 
 
 def get_favorite(p1, p2):
-    """
-    Возвращает (favorite, underdog, fav_index, fav_rank, und_rank) или None.
-    Сниженные требования: фаворит определяется, если рейтинг есть хотя бы у одного.
-    """
     r1 = p1.get('ranking')
     r2 = p2.get('ranking')
     if r1 and r2:
@@ -92,7 +84,7 @@ def get_favorite(p1, p2):
         return p1, p2, 0, r1, "нет"
     elif r2 and not r1:
         return p2, p1, 1, r2, "нет"
-    return None  # оба без рейтинга — пропускаем
+    return None
 
 
 async def check_signals(bot: Bot):
@@ -115,24 +107,44 @@ async def check_signals(bot: Bot):
                 score = m.get('score') or {}
                 sets = score.get('sets') or []
                 games = score.get('games') or []
+                age = score.get('age_seconds')
 
                 fav_data = get_favorite(p1, p2)
                 if not fav_data:
                     continue
                 favorite, underdog, fav_index, fav_rank, und_rank = fav_data
 
-                # --- СИГНАЛ 1: Фаворит ПРОИГРАЛ ПЕРВЫЙ СЕТ (счёт 0:1) ---
-                # Проверяем: первый сет завершён, и фаворит его проиграл
-                if len(sets) == 2 and len(games) >= 1:
+                # --- ОТЛАДКА: печатаем сырые данные для каждого матча ---
+                print(f"=== DEBUG матч {mid} ===")
+                print(f"  tournament: {tournament}")
+                print(f"  round: {round_name}")
+                print(f"  p1: {p1.get('name')} (rank {p1.get('ranking')})")
+                print(f"  p2: {p2.get('name')} (rank {p2.get('ranking')})")
+                print(f"  favorite: {favorite.get('name')} (index {fav_index})")
+                print(f"  underdog: {underdog.get('name')}")
+                print(f"  sets (raw): {sets}")
+                print(f"  games (raw): {games}")
+                print(f"  age_seconds: {age}")
+                print(f"=== КОНЕЦ DEBUG ===")
+
+                # --- СИГНАЛ 1: Фаворит проиграл первый сет ---
+                # Условие: матч ещё в первом или втором сете (len(games) <= 2)
+                # и счёт по сетам 0:1 (фаворит проиграл ровно один сет)
+                if len(sets) == 2:
                     fav_sets = sets[fav_index]
                     und_sets = sets[1 - fav_index]
                     if fav_sets == 0 and und_sets == 1:
+                        # Проверяем, что данных не устарели (age < 120 сек)
+                        if age is not None and age > 180:
+                            print(f"  матч {mid}: пропуск — данные устарели (age {age})")
+                            continue
+
                         favorites_losing += 1
                         first_set_lost_count += 1
                         summary_lines.append(
                             f"• {favorite.get('name')} проиграл 1-й сет vs {underdog.get('name')}"
                         )
-                        key = f"{mid}_firstset_{fav_sets}_{und_sets}"
+                        key = f"{mid}_firstset"
                         if key not in sent_signals:
                             sent_signals.add(key)
                             games_str = format_games(games, fav_index)
@@ -156,11 +168,15 @@ async def check_signals(bot: Bot):
                             except Exception as e:
                                 print(f"Ошибка отправки: {e}")
 
-                # --- СИГНАЛ 2: Фаворит проигрывает по сетам (более 0:1, например 0:2 или 1:2) ---
+                # --- СИГНАЛ 2: Фаворит проигрывает по сетам (0:2, 1:2 и т.д.) ---
                 if len(sets) == 2:
                     fav_sets = sets[fav_index]
                     und_sets = sets[1 - fav_index]
                     if fav_sets < und_sets and und_sets > 1:
+                        if age is not None and age > 180:
+                            print(f"  матч {mid}: пропуск — данные устарели (age {age})")
+                            continue
+
                         key = f"{mid}_setloss_{fav_sets}_{und_sets}"
                         if key not in sent_signals:
                             sent_signals.add(key)
@@ -185,7 +201,7 @@ async def check_signals(bot: Bot):
                             except Exception as e:
                                 print(f"Ошибка отправки: {e}")
 
-            # --- СИГНАЛ 3: Часовая сводка ---
+            # --- Часовая сводка ---
             now = int(time.time())
             if now - last_summary_time >= 3600:
                 last_summary_time = now
