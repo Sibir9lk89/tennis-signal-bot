@@ -78,47 +78,55 @@ def write_signal_to_sheet(row_data):
 
 # --- The Odds API ---
 async def get_live_odds(player1, player2):
-    """Запрашивает live-коэффициенты для матча у The Odds API."""
+    """Запрашивает live-коэффициенты у The Odds API по всем теннисным турнирам."""
     if not THE_ODDS_API_KEY:
         return None
 
-    url = "https://api.the-odds-api.com/v4/sports/tennis_atp/odds/"
-    params = {
-        "apiKey": THE_ODDS_API_KEY,
-        "regions": "eu",
-        "markets": "h2h",
-        "oddsFormat": "decimal",
-    }
+    tennis_keys = [
+        "tennis_atp_china_open",
+        "tennis_atp_japan_open",
+        "tennis_wta_china_open",
+    ]
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=10) as resp:
-                if resp.status != 200:
-                    print(f"=== ODDS API: статус {resp.status} ===")
-                    return None
-                data = await resp.json()
-                for match in data:
-                    home = (match.get("home_team") or "").lower()
-                    away = (match.get("away_team") or "").lower()
-                    p1_low = player1.lower()
-                    p2_low = player2.lower()
-                    if (p1_low in home or p1_low in away) and (p2_low in home or p2_low in away):
-                        bookmakers = match.get("bookmakers") or []
-                        if bookmakers:
-                            markets = bookmakers[0].get("markets") or []
-                            if markets:
-                                outcomes = markets[0].get("outcomes") or []
-                                for o in outcomes:
-                                    name = (o.get("name") or "").lower()
-                                    if p2_low in name:
-                                        return o.get("price")
-                return None
-    except asyncio.TimeoutError:
-        print("=== ODDS API: таймаут ===")
-        return None
-    except Exception as e:
-        print(f"=== ODDS API: ошибка: {e} ===")
-        return None
+    p1_low = player1.lower()
+    p2_low = player2.lower()
+
+    for sport_key in tennis_keys:
+        url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/"
+        params = {
+            "apiKey": THE_ODDS_API_KEY,
+            "regions": "eu",
+            "markets": "h2h",
+            "oddsFormat": "decimal",
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, timeout=10) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+                    if not isinstance(data, list):
+                        continue
+                    for match in data:
+                        home = (match.get("home_team") or "").lower()
+                        away = (match.get("away_team") or "").lower()
+                        if (p1_low in home or p1_low in away) and (p2_low in home or p2_low in away):
+                            bookmakers = match.get("bookmakers") or []
+                            if bookmakers:
+                                markets = bookmakers[0].get("markets") or []
+                                if markets:
+                                    outcomes = markets[0].get("outcomes") or []
+                                    for o in outcomes:
+                                        name = (o.get("name") or "").lower()
+                                        if p2_low in name:
+                                            return o.get("price")
+        except asyncio.TimeoutError:
+            continue
+        except Exception as e:
+            print(f"=== ODDS API ({sport_key}): ошибка: {e} ===")
+            continue
+
+    return None
 
 
 # --- Live Tennis API ---
