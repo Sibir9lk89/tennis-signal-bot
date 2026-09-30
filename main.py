@@ -6,6 +6,7 @@ from aiogram.client.default import DefaultBotProperties
 import os
 import time
 import json
+import base64
 from datetime import datetime
 
 # Google Sheets
@@ -17,7 +18,7 @@ LIVETENNIS_KEY = os.getenv("LIVETENNIS_API_KEY")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 THE_ODDS_API_KEY = os.getenv("THE_ODDS_API_KEY")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON")
+GOOGLE_CREDS_BASE64 = os.getenv("GOOGLE_CREDS_BASE64")
 
 dp = Dispatcher()
 
@@ -36,11 +37,12 @@ def init_google_sheets():
     """Подключается к Google-таблице. Возвращает True/False."""
     global gs_client, sheet
     try:
-        if not GOOGLE_CREDS_JSON:
-            print("=== GOOGLE: нет переменной GOOGLE_CREDS_JSON ===")
+        if not GOOGLE_CREDS_BASE64:
+            print("=== GOOGLE: нет переменной GOOGLE_CREDS_BASE64 ===")
             return False
 
-        creds_dict = json.loads(GOOGLE_CREDS_JSON)
+        decoded = base64.b64decode(GOOGLE_CREDS_BASE64).decode("utf-8")
+        creds_dict = json.loads(decoded)
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive",
@@ -48,9 +50,8 @@ def init_google_sheets():
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         gs_client = gspread.authorize(creds)
 
-        # Открываем таблицу по ID
         spreadsheet = gs_client.open_by_key(GOOGLE_SHEET_ID)
-        sheet = spreadsheet.sheet1  # первый лист
+        sheet = spreadsheet.sheet1
         print(f"=== GOOGLE: подключено к таблице '{spreadsheet.title}' ===")
         return True
     except json.JSONDecodeError as e:
@@ -76,10 +77,7 @@ def write_signal_to_sheet(row_data):
 
 # --- The Odds API ---
 async def get_live_odds(player1, player2):
-    """
-    Запрашивает live-коэффициенты для матча у The Odds API.
-    Возвращает коэффициент на player2 (андердога) или None.
-    """
+    """Запрашивает live-коэффициенты для матча у The Odds API."""
     if not THE_ODDS_API_KEY:
         return None
 
@@ -98,14 +96,12 @@ async def get_live_odds(player1, player2):
                     print(f"=== ODDS API: статус {resp.status} ===")
                     return None
                 data = await resp.json()
-                # Ищем матч по именам игроков
                 for match in data:
                     home = (match.get("home_team") or "").lower()
                     away = (match.get("away_team") or "").lower()
                     p1_low = player1.lower()
                     p2_low = player2.lower()
                     if (p1_low in home or p1_low in away) and (p2_low in home or p2_low in away):
-                        # Нашли матч — берём первый букмекерский кэф на андердога
                         bookmakers = match.get("bookmakers") or []
                         if bookmakers:
                             markets = bookmakers[0].get("markets") or []
@@ -246,7 +242,6 @@ async def check_signals(bot: Bot):
                             games_str = format_games(games, p1_name, p2_name)
                             round_str = f"🎾 Раунд: {round_name}\n" if round_name else ""
 
-                            # Запрашиваем кэф на андердога
                             odds = await get_live_odds(p1_name, p2_name)
                             odds_str = f"💰 <b>Live-кэф на андердога:</b> {odds}\n" if odds else ""
 
@@ -270,7 +265,6 @@ async def check_signals(bot: Bot):
                             except Exception as e:
                                 print(f"Ошибка отправки: {e}")
 
-                            # Запись в Google-таблицу
                             write_signal_to_sheet([
                                 datetime.now().strftime("%Y-%m-%d %H:%M"),
                                 tournament,
@@ -314,7 +308,6 @@ async def check_signals(bot: Bot):
 
 
 async def main():
-    # Подключаемся к Google Sheets
     print("=== СТАРТ: подключение к Google Sheets ===")
     init_google_sheets()
 
