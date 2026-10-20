@@ -20,6 +20,7 @@ GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 GOOGLE_CREDS_BASE64 = os.getenv("GOOGLE_CREDS_BASE64")
 
 dp = Dispatcher()
+
 api_blocked_until = 0
 sent_signals = set()
 last_summary_time = 0
@@ -28,10 +29,12 @@ STALE_THRESHOLD = 120
 gs_client = None
 sheet = None
 
+
 def init_google_sheets():
     global gs_client, sheet
     try:
-        if not GOOGLE_CREDS_BASE64: return False
+        if not GOOGLE_CREDS_BASE64:
+            return False
         cleaned = GOOGLE_CREDS_BASE64.strip().strip('"').strip("'").replace("\n", "").replace(" ", "")
         decoded = base64.b64decode(cleaned).decode("utf-8")
         creds_dict = json.loads(decoded)
@@ -46,16 +49,26 @@ def init_google_sheets():
         print(f"=== GOOGLE: ошибка: {e} ===")
         return False
 
+
 def write_signal_to_sheet(row_data):
     global sheet
-    if sheet is None: return
+    if sheet is None:
+        return
     try:
-        sheet.append_row(row_data)
-        print("=== GOOGLE: записана строка ===")
-    except Exception as e: print(f"Ошибка записи: {e}")
+        # Получаем все значения, чтобы найти первую пустую строку
+        all_values = sheet.get_all_values()
+        next_row = len(all_values) + 1
+        
+        # Записываем строго в колонки A - K (11 колонок)
+        sheet.update(f"A{next_row}:K{next_row}", [row_data])
+        print(f"=== GOOGLE: записана строка {next_row} ===")
+    except Exception as e:
+        print(f"=== GOOGLE: ошибка записи: {e} ===")
+
 
 async def get_live_odds(player1, player2):
-    if not THE_ODDS_API_KEY: return None
+    if not THE_ODDS_API_KEY:
+        return None
     tennis_keys = ["tennis_atp_china_open", "tennis_atp_japan_open", "tennis_wta_china_open"]
     p1_low, p2_low = player1.lower(), player2.lower()
     for sport_key in tennis_keys:
@@ -64,9 +77,11 @@ async def get_live_odds(player1, player2):
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params=params, timeout=10) as resp:
-                    if resp.status != 200: continue
+                    if resp.status != 200:
+                        continue
                     data = await resp.json()
-                    if not isinstance(data, list): continue
+                    if not isinstance(data, list):
+                        continue
                     for match in data:
                         home, away = (match.get("home_team") or "").lower(), (match.get("away_team") or "").lower()
                         if (p1_low in home or p1_low in away) and (p2_low in home or p2_low in away):
@@ -77,17 +92,21 @@ async def get_live_odds(player1, player2):
                                     for o in (markets[0].get("outcomes") or []):
                                         if p2_low in (o.get("name") or "").lower():
                                             return o.get("price")
-        except: continue
+        except Exception:
+            continue
     return None
+
 
 async def get_live_matches():
     global api_blocked_until
     now = int(time.time())
-    if now < api_blocked_until: return []
+    if now < api_blocked_until:
+        return []
     url = "https://api.livetennisapi.com/api/public/v1/matches"
     headers = {"Authorization": f"Bearer {LIVETENNIS_KEY}"}
+    params = {"status": "live"}
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers, params={"status": "live"}) as resp:
+        async with session.get(url, headers=headers, params=params) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 return data.get("data", [])
@@ -96,11 +115,15 @@ async def get_live_matches():
                     err = await resp.json()
                     retry = err.get("retry_at_epoch")
                     api_blocked_until = int(retry) if retry else now + 3600
-                except: api_blocked_until = now + 3600
-    return []
+                except Exception:
+                    api_blocked_until = now + 3600
+                return []
+            return []
+
 
 def format_games(games, p1_name, p2_name):
-    if not games: return "—"
+    if not games:
+        return "—"
     lines = []
     for i, g in enumerate(games, start=1):
         if len(g) == 2:
@@ -109,13 +132,17 @@ def format_games(games, p1_name, p2_name):
             lines.append(f"   Сет {i}: {g1}–{g2} ({winner})")
     return "\n".join(lines)
 
+
 def get_favorite(p1, p2):
     r1, r2 = p1.get('ranking'), p2.get('ranking')
     if r1 and r2:
         return (p1, p2, 0, r1, r2) if r1 < r2 else (p2, p1, 1, r2, r1)
-    elif r1 and not r2: return p1, p2, 0, r1, "нет"
-    elif r2 and not r1: return p2, p1, 1, r2, "нет"
+    elif r1 and not r2:
+        return p1, p2, 0, r1, "нет"
+    elif r2 and not r1:
+        return p2, p1, 1, r2, "нет"
     return None
+
 
 async def check_signals(bot: Bot):
     global sent_signals, last_summary_time
@@ -138,11 +165,13 @@ async def check_signals(bot: Bot):
                 score = m.get('score') or {}
                 sets, games, age = score.get('sets') or [], score.get('games') or [], score.get('age_seconds')
 
-                if age is not None and age > STALE_THRESHOLD: continue
+                if age is not None and age > STALE_THRESHOLD:
+                    continue
                 fresh_count += 1
 
                 fav_data = get_favorite(p1, p2)
-                if not fav_data: continue
+                if not fav_data:
+                    continue
                 favorite, underdog, fav_index, fav_rank, und_rank = fav_data
 
                 if len(sets) == 2:
@@ -172,27 +201,33 @@ async def check_signals(bot: Bot):
                             try:
                                 await bot.send_message(chat_id=CHANNEL_ID, text=msg)
                                 print(f"СИГНАЛ: {mid}")
-                            except Exception as e: print(f"Ошибка отправки: {e}")
+                            except Exception as e:
+                                print(f"Ошибка отправки: {e}")
                             
-                            # Записываем строку, оставляя J, K, L пустыми для ручного заполнения
                             write_signal_to_sheet([
                                 datetime.now().strftime("%Y-%m-%d %H:%M"), tournament, round_name,
                                 favorite.get('name'), str(fav_rank), underdog.get('name'), str(und_rank),
-                                f"{sets[0]}:{sets[1]}", odds if odds else "", "", "", ""
+                                f"{sets[0]}:{sets[1]}", odds if odds else "", "", ""
                             ])
 
             now = int(time.time())
             if now - last_summary_time >= 3600:
                 last_summary_time = now
                 summary_msg = f"📊 <b>СВОДКА ЗА ЧАС</b>\n\n🎾 Матчей: {fresh_count}\n🔴 Фаворитов проиграли 1-й сет: {first_set_lost_count}\n"
-                if summary_lines: summary_msg += f"\n<b>Кого смотреть:</b>\n" + "\n".join(summary_lines[:15])
-                else: summary_msg += f"\n✅ Все фавориты в порядке"
-                try: await bot.send_message(chat_id=CHANNEL_ID, text=summary_msg)
-                except: pass
+                if summary_lines:
+                    summary_msg += f"\n<b>Кого смотреть:</b>\n" + "\n".join(summary_lines[:15])
+                else:
+                    summary_msg += f"\n✅ Все фавориты в порядке"
+                try:
+                    await bot.send_message(chat_id=CHANNEL_ID, text=summary_msg)
+                except Exception:
+                    pass
 
-        except Exception as e: print(f"Ошибка: {e}")
+        except Exception as e:
+            print(f"Ошибка: {e}")
 
         await asyncio.sleep(900)
+
 
 async def main():
     print("=== СТАРТ ===")
@@ -200,6 +235,7 @@ async def main():
     bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     asyncio.create_task(check_signals(bot))
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
