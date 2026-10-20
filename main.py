@@ -9,7 +9,6 @@ import json
 import base64
 from datetime import datetime
 
-# Google Sheets
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -21,24 +20,18 @@ GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 GOOGLE_CREDS_BASE64 = os.getenv("GOOGLE_CREDS_BASE64")
 
 dp = Dispatcher()
-
 api_blocked_until = 0
 sent_signals = set()
 last_summary_time = 0
-last_results_check = 0
-
 STALE_THRESHOLD = 120
 
-# --- Google Sheets ---
 gs_client = None
 sheet = None
-
 
 def init_google_sheets():
     global gs_client, sheet
     try:
-        if not GOOGLE_CREDS_BASE64:
-            return False
+        if not GOOGLE_CREDS_BASE64: return False
         cleaned = GOOGLE_CREDS_BASE64.strip().strip('"').strip("'").replace("\n", "").replace(" ", "")
         decoded = base64.b64decode(cleaned).decode("utf-8")
         creds_dict = json.loads(decoded)
@@ -47,28 +40,22 @@ def init_google_sheets():
         gs_client = gspread.authorize(creds)
         spreadsheet = gs_client.open_by_key(GOOGLE_SHEET_ID)
         sheet = spreadsheet.sheet1
-        print(f"=== GOOGLE: подключено к '{spreadsheet.title}' ===")
+        print("=== GOOGLE: подключено ===")
         return True
     except Exception as e:
         print(f"=== GOOGLE: ошибка: {e} ===")
         return False
 
-
 def write_signal_to_sheet(row_data):
     global sheet
-    if sheet is None:
-        return
+    if sheet is None: return
     try:
         sheet.append_row(row_data)
-        print(f"=== GOOGLE: записана строка ===")
-    except Exception as e:
-        print(f"=== GOOGLE: ошибка записи: {e} ===")
+        print("=== GOOGLE: записана строка ===")
+    except Exception as e: print(f"Ошибка записи: {e}")
 
-
-# --- The Odds API ---
 async def get_live_odds(player1, player2):
-    if not THE_ODDS_API_KEY:
-        return None
+    if not THE_ODDS_API_KEY: return None
     tennis_keys = ["tennis_atp_china_open", "tennis_atp_japan_open", "tennis_wta_china_open"]
     p1_low, p2_low = player1.lower(), player2.lower()
     for sport_key in tennis_keys:
@@ -90,22 +77,17 @@ async def get_live_odds(player1, player2):
                                     for o in (markets[0].get("outcomes") or []):
                                         if p2_low in (o.get("name") or "").lower():
                                             return o.get("price")
-        except Exception:
-            continue
+        except: continue
     return None
 
-
-# --- Live Tennis API ---
 async def get_live_matches():
     global api_blocked_until
     now = int(time.time())
-    if now < api_blocked_until:
-        return []
+    if now < api_blocked_until: return []
     url = "https://api.livetennisapi.com/api/public/v1/matches"
     headers = {"Authorization": f"Bearer {LIVETENNIS_KEY}"}
-    params = {"status": "live"}
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers, params=params) as resp:
+        async with session.get(url, headers=headers, params={"status": "live"}) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 return data.get("data", [])
@@ -115,9 +97,7 @@ async def get_live_matches():
                     retry = err.get("retry_at_epoch")
                     api_blocked_until = int(retry) if retry else now + 3600
                 except: api_blocked_until = now + 3600
-                return []
-            return []
-
+    return []
 
 def format_games(games, p1_name, p2_name):
     if not games: return "—"
@@ -129,7 +109,6 @@ def format_games(games, p1_name, p2_name):
             lines.append(f"   Сет {i}: {g1}–{g2} ({winner})")
     return "\n".join(lines)
 
-
 def get_favorite(p1, p2):
     r1, r2 = p1.get('ranking'), p2.get('ranking')
     if r1 and r2:
@@ -138,81 +117,10 @@ def get_favorite(p1, p2):
     elif r2 and not r1: return p2, p1, 1, r2, "нет"
     return None
 
-
-# --- Проверка результатов (Flashscore) ---
-async def check_finished_matches():
-    global sheet, last_results_check
-    now = int(time.time())
-    if now - last_results_check < 1800:  # раз в 30 минут
-        return
-    last_results_check = now
-    
-    if not sheet:
-        return
-
-    print("=== RESULTS: проверка завершённых матчей через Flashscore ===")
-    
-    # Flashscore использует ID 2 для тенниса
-    url = "https://local-global.flashscore.ninja/2/x/feed/f_2_0_3_en_1"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "x-fsign": "SW9D1eZo" # Публичный ключ доступа к их ленте
-    }
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=15) as resp:
-                if resp.status != 200: 
-                    print(f"=== RESULTS: статус {resp.status} ===")
-                    return
-                text = await resp.text()
-                
-                # Получаем все строки таблицы
-                all_rows = sheet.get_all_values()
-                start_row = max(2, len(all_rows) - 200) # Берем только последние 200 строк
-                
-                for row_idx, row in enumerate(all_rows[start_row-1:], start=start_row):
-                    if len(row) < 8 or row[7] == "": continue 
-                    if len(row) > 11 and row[11] != "": continue # Если уже заполнено
-                    
-                    fav_name = row[3].strip().lower()
-                    und_name = row[5].strip().lower()
-                    
-                    # Flashscore отдает данные в виде строк, разделенных символами ¬ и ÷
-                    # Ищем имена игроков в сыром тексте
-                    fav_clean = fav_name.replace(" ", "")
-                    und_clean = und_name.replace(" ", "")
-                    
-                    if fav_clean in text.lower() and und_clean in text.lower():
-                        # Если оба игрока есть в фиде, значит матч завершён
-                        # В Flashscore счет по сетам идет после имен, но нам важен итог
-                        
-                        winner = "Смотри Flashscore"
-                        final_score = "Смотри Flashscore"
-                        result_text = "✅ Матч завершён (проверь счет)"
-                        
-                        # Записываем в J, K, L
-                        sheet.update(f"J{row_idx}:L{row_idx}", [[final_score, winner, result_text]])
-                        
-                        # Красим в нейтральный цвет (серый), так как точный победитель не известен
-                        try:
-                            sheet.format(f"A{row_idx}:L{row_idx}", {"backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}})
-                        except Exception as e:
-                            pass
-                            
-                        print(f"=== RESULTS: матч {fav_name} vs {und_name} найден в Flashscore ===")
-    except Exception as e:
-        print(f"=== RESULTS: ошибка Flashscore: {e} ===")
-
-
 async def check_signals(bot: Bot):
     global sent_signals, last_summary_time
     while True:
         try:
-            # 1. Проверка результатов
-            await check_finished_matches()
-            
-            # 2. Получение live-матчей
             matches = await get_live_matches()
             print(f"=== Матчей: {len(matches)} ===")
 
@@ -258,38 +166,33 @@ async def check_signals(bot: Bot):
                                 f"━━━━━━━━━━━━━━━━━━━━\n"
                                 f"📊 <b>Счёт по сетам:</b> {sets[0]} : {sets[1]}\n"
                                 f"🎯 <b>Геймы:</b>\n{games_str}\n{odds_str}\n"
-                                f"💡 <i>СТАВКА: на победу фаворита в матче (отыгрыш)</i>"
+                                f"💡 <i>СТАВКА: на победу фаворита в матче (отыгрыш)</i>\n"
+                                f"📝 <i>После матча впиши счёт в колонку J в таблице!</i>"
                             )
                             try:
                                 await bot.send_message(chat_id=CHANNEL_ID, text=msg)
                                 print(f"СИГНАЛ: {mid}")
                             except Exception as e: print(f"Ошибка отправки: {e}")
                             
+                            # Записываем строку, оставляя J, K, L пустыми для ручного заполнения
                             write_signal_to_sheet([
                                 datetime.now().strftime("%Y-%m-%d %H:%M"), tournament, round_name,
                                 favorite.get('name'), str(fav_rank), underdog.get('name'), str(und_rank),
                                 f"{sets[0]}:{sets[1]}", odds if odds else "", "", "", ""
                             ])
 
-            # 3. Часовая сводка
             now = int(time.time())
             if now - last_summary_time >= 3600:
                 last_summary_time = now
-                summary_msg = (
-                    f"📊 <b>СВОДКА ЗА ЧАС</b>\n\n🎾 Live-матчей (свежих): {fresh_count}\n"
-                    f"🔴 Фаворитов проиграли 1-й сет: {first_set_lost_count}\n"
-                )
+                summary_msg = f"📊 <b>СВОДКА ЗА ЧАС</b>\n\n🎾 Матчей: {fresh_count}\n🔴 Фаворитов проиграли 1-й сет: {first_set_lost_count}\n"
                 if summary_lines: summary_msg += f"\n<b>Кого смотреть:</b>\n" + "\n".join(summary_lines[:15])
-                else: summary_msg += f"\n✅ Все фавориты пока в порядке"
-                try:
-                    await bot.send_message(chat_id=CHANNEL_ID, text=summary_msg)
+                else: summary_msg += f"\n✅ Все фавориты в порядке"
+                try: await bot.send_message(chat_id=CHANNEL_ID, text=summary_msg)
                 except: pass
 
-        except Exception as e:
-            print(f"Ошибка: {e}")
+        except Exception as e: print(f"Ошибка: {e}")
 
-        await asyncio.sleep(900) # 15 минут
-
+        await asyncio.sleep(900)
 
 async def main():
     print("=== СТАРТ ===")
@@ -297,7 +200,6 @@ async def main():
     bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     asyncio.create_task(check_signals(bot))
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
